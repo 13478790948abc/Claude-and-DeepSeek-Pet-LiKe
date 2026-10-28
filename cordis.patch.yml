@@ -1,0 +1,6 @@
+# Claude × DeepSeek pet bundle patch: inserts one host row plus its Client module.
+# The Host half serves the sprite sheet / two audio clips and owns the pet state
+# machine; the Client half renders the overlay into `shell.overlay`.
+- insert:
+    - id: duo-pet
+      name: '@local/dsh-duo-pet'

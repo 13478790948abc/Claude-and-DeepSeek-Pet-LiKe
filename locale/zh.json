@@ -1,0 +1,17 @@
+{
+  "meta": {
+    "title": "Claude × DeepSeek 桌宠",
+    "description": "在界面底部居中显示 Claude 与 DeepSeek 的 Q 版桌宠：每 5 秒 Claude 与 DeepSeek 互相贴贴 3 秒（中间冒爱心）；需要授权时 Claude 说「盐津虾嘛」，任务完成时说「任务完成了」。可拖动、右键菜单、记忆位置。"
+  },
+  "bubble": {
+    "sally": "盐津虾嘛",
+    "done": "任务完成了",
+    "hint": "点我一下嘛～",
+    "dragging": "别拖我啦～"
+  },
+  "menu": {
+    "snuggle": "贴贴",
+    "celebrate": "庆祝",
+    "idle": "待机"
+  }
+}

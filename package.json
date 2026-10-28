@@ -1,0 +1,47 @@
+{
+  "name": "dsh-duo-pet",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Claude × DeepSeek chibi desktop pet for the DeepSeek Harness Web UI: the two girls snuggle with hearts every 5 seconds, react to approval requests and task completions, and a transparent desktop overlay keeps them visible when the app window is minimized.",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "desktop-pet",
+    "plugin",
+    "spritesheet"
+  ],
+  "license": "MIT",
+  "icon": "icon.png",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.png",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "icon.png",
+    "locale/*.json",
+    "desktop/*.ps1",
+    "desktop/messages.json",
+    "assets/spritesheet.png",
+    "assets/sally.mp3",
+    "assets/done.mp3",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": ["@deepseek-ai/dsh-client-ui-layout"]
+    }
+  }
+}

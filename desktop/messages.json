@@ -1,0 +1,19 @@
+{
+  "bubble": {
+    "sally": "盐津虾嘛",
+    "done": "任务完成了"
+  },
+  "menu": {
+    "openDsh": "打开 DSH",
+    "action": "动作",
+    "actionSnuggle": "贴贴",
+    "actionCelebrate": "庆祝",
+    "actionIdle": "待机",
+    "topmostOn": "置顶",
+    "topmostOff": "取消置顶",
+    "alwaysShowOn": "总是显示",
+    "alwaysShowOff": "仅最小化时显示",
+    "closePet": "关闭桌宠",
+    "exit": "退出桌宠"
+  }
+}

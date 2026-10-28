@@ -1,0 +1,17 @@
+{
+  "meta": {
+    "title": "Claude × DeepSeek Pet",
+    "description": "A chibi Claude and DeepSeek desk pet in the bottom center: every 5 seconds Claude and DeepSeek snuggle together for 3 seconds with hearts between them; when approval is needed Claude says \"Yánjīn xiā ma!\", and when a task finishes it says \"Mission complete!\". Draggable, right-click menu, position memory."
+  },
+  "bubble": {
+    "sally": "Yánjīn xiā ma!",
+    "done": "Mission complete!",
+    "hint": "Click me~",
+    "dragging": "Don't drag me~"
+  },
+  "menu": {
+    "snuggle": "Snuggle",
+    "celebrate": "Celebrate",
+    "idle": "Idle"
+  }
+}
