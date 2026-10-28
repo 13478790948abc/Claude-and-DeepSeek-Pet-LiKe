@@ -7,11 +7,19 @@
     "sally": "Yánjīn xiā ma!",
     "done": "Mission complete!",
     "hint": "Click me~",
-    "dragging": "Don't drag me~"
+    "dragging": "Don't drag me~",
+    "closed": "Pet closed — refresh the page to bring it back"
   },
   "menu": {
     "snuggle": "Snuggle",
     "celebrate": "Celebrate",
-    "idle": "Idle"
+    "idle": "Idle",
+    "minimizeDsh": "Minimize DSH",
+    "action": "Action",
+    "topmost": "Always on top",
+    "untopmost": "Unpin topmost",
+    "alwaysShow": "Always show",
+    "cancelAlwaysShow": "Stop always-show",
+    "closePet": "Close pet"
   }
 }

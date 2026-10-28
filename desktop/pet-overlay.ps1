@@ -196,6 +196,14 @@ $script:BubbleExtra = 0
 $script:BubbleHeight = 0
 $script:FrameCellRow = -1
 $script:FrameCellCol = -1
+# Host-shared overlay options (GET /duo-pet/state, POST /duo-pet/overlay-option).
+$script:OverlayTopmost = $true
+# Absolute screen anchor = person bbox bottom-centre in DIP. Frame changes only compute
+# Left = AnchorX - W/2 and Top = AnchorY - H from this; no incremental corrections (the
+# old delta approach accumulated WPF rounding error and drifted the window off screen).
+$script:AnchorX = $null
+$script:AnchorY = $null
+$script:GeometryUpdateCount = 0
 
 $script:Animations = @{}
 $idleFrames = @()
@@ -509,11 +517,48 @@ function Update-BubbleGeometry {
   }
 }
 
+# Clamp a window rectangle into the virtual screen. Used on every geometry/position
+# update so the pet can never be moved off screen by frame changes.
+function Get-ClampedWindowPosition([double]$Left, [double]$Top, [double]$Width, [double]$Height) {
+  $vsLeft = [double][System.Windows.SystemParameters]::VirtualScreenLeft
+  $vsTop = [double][System.Windows.SystemParameters]::VirtualScreenTop
+  $vsRight = $vsLeft + [double][System.Windows.SystemParameters]::VirtualScreenWidth
+  $vsBottom = $vsTop + [double][System.Windows.SystemParameters]::VirtualScreenHeight
+  $maxLeft = $vsRight - $Width
+  $maxTop = $vsBottom - $Height
+  if ($maxLeft -lt $vsLeft) { $maxLeft = $vsLeft }
+  if ($maxTop -lt $vsTop) { $maxTop = $vsTop }
+  if ($Left -lt $vsLeft) { $Left = $vsLeft }
+  if ($Left -gt $maxLeft) { $Left = $maxLeft }
+  if ($Top -lt $vsTop) { $Top = $vsTop }
+  if ($Top -gt $maxTop) { $Top = $maxTop }
+  return @($Left, $Top)
+}
+
+# Absolute anchor = person bbox bottom-centre in screen DIP. Updated only on initial
+# placement, drag end and show/restore; frame resizes derive Left/Top from it.
+function Update-AnchorFromWindow {
+  if ($null -eq $script:Window) { return }
+  try {
+    $personTop = [double]$script:Window.Top + [double]$script:BubbleExtra
+    $script:AnchorX = [double]$script:Window.Left + ([double]$script:PersonW / 2)
+    $script:AnchorY = $personTop + [double]$script:PersonH
+    Write-Log ('anchor set: x={0} y={1} (left={2} top={3} extra={4} person={5}x{6})' -f
+      [int]$script:AnchorX, [int]$script:AnchorY, [int]$script:Window.Left, [int]$script:Window.Top,
+      $script:BubbleExtra, [int]$script:PersonW, [int]$script:PersonH)
+  } catch {
+    # anchor update is best-effort
+  }
+}
+
 # Resize/move the window so it is exactly the person bbox (+ tolerance), or that plus
-# BubbleExtra while a bubble is shown. Window bottom-centre stays anchored, which maps
-# to the character bbox bottom-centre, so frame changes do not make the pet drift.
+# BubbleExtra while a bubble is shown. Left/Top are always computed absolutely from the
+# anchor (never by accumulating deltas), then clamped into the virtual screen.
 function Apply-WindowGeometry([string]$Reason) {
   try {
+    # During a user drag the window follows the mouse; applying the absolute anchor
+    # here would fight the drag. Resize again on the next frame after drag end.
+    if ($script:Dragging) { return $true }
     $personW = [int][Math]::Round($script:PersonW)
     $personH = [int][Math]::Round($script:PersonH)
     $extra = [int][Math]::Round($script:BubbleExtra)
@@ -529,22 +574,45 @@ function Apply-WindowGeometry([string]$Reason) {
       $script:FrameImage.VerticalAlignment = [System.Windows.VerticalAlignment]::Top
     }
     if ($null -ne $script:Bubble) { $script:Bubble.MaxWidth = [Math]::Max([double]80, [double]($personW - 8)) }
+    $logLeft = 0
+    $logTop = 0
+    $logAnchorX = 0
+    $logAnchorY = 0
     if ($null -ne $script:Window) {
-      $oldW = [double]$script:Window.Width
-      $oldH = [double]$script:Window.Height
+      if ($null -eq $script:AnchorX -or $null -eq $script:AnchorY) { Update-AnchorFromWindow }
       $newW = [double]$personW
       $newH = [double]$totalH
-      if ([Math]::Abs($newW - $oldW) -ge 0.5 -or [Math]::Abs($newH - $oldH) -ge 0.5) {
-        $oldLeft = [double]$script:Window.Left
-        $oldTop = [double]$script:Window.Top
+      if ([Math]::Abs([double]$script:Window.Width - $newW) -ge 0.01) {
         $script:Window.Width = $newW
+      }
+      if ([Math]::Abs([double]$script:Window.Height - $newH) -ge 0.01) {
         $script:Window.Height = $newH
-        # Preserve the bottom-centre anchor (bbox bottom-centre).
-        $script:Window.Left = $oldLeft - (($newW - $oldW) / 2)
-        $script:Window.Top = $oldTop - ($newH - $oldH)
+      }
+      if ($null -ne $script:AnchorX -and $null -ne $script:AnchorY) {
+        # Absolute placement from the anchor: no incremental delta, so WPF rounding
+        # can never accumulate into a drift.
+        $targetLeft = [double]$script:AnchorX - ($newW / 2)
+        $targetTop = [double]$script:AnchorY - $newH
+        $clamped = Get-ClampedWindowPosition $targetLeft $targetTop $newW $newH
+        if ([Math]::Abs([double]$script:Window.Left - [double]$clamped[0]) -ge 0.01) {
+          $script:Window.Left = [double]$clamped[0]
+        }
+        if ([Math]::Abs([double]$script:Window.Top - [double]$clamped[1]) -ge 0.01) {
+          $script:Window.Top = [double]$clamped[1]
+        }
       }
       $script:Window.UpdateLayout()
       $script:PetHitRect = [System.Windows.Rect]::new(0, 0, [double]$script:Window.Width, [double]$script:Window.Height)
+      $logLeft = [int]$script:Window.Left
+      $logTop = [int]$script:Window.Top
+      $logAnchorX = [int]$script:AnchorX
+      $logAnchorY = [int]$script:AnchorY
+      $script:GeometryUpdateCount++
+      if (($script:GeometryUpdateCount % 50) -eq 0) {
+        Write-Log ('drift-check frame={0} left={1} top={2} anchor={3},{4} width={5} height={6}' -f
+          $script:GeometryUpdateCount, $logLeft, $logTop,
+          $logAnchorX, $logAnchorY, [int]$script:Window.Width, [int]$script:Window.Height)
+      }
     } else {
       $script:PetHitRect = [System.Windows.Rect]::new(0, 0, [double]$personW, [double]$totalH)
     }
@@ -558,9 +626,10 @@ function Apply-WindowGeometry([string]$Reason) {
       # Keep the bubble tail above the (possibly new) head position.
       Update-BubbleGeometry
     }
-    Write-Log ('window-size ({0}): w={1} h={2} person={3}x{4} extra={5} imageLeft={6} imageTop={7} frame={8},{9}' -f
+    Write-Log ('window-size ({0}): w={1} h={2} person={3}x{4} extra={5} imageLeft={6} imageTop={7} left={8} top={9} anchor={10},{11} frame={12},{13}' -f
       $Reason, [int]$script:PetHitRect.Width, [int]$script:PetHitRect.Height,
       $personW, $personH, $extra, [Math]::Round($script:ImageLeft, 1), [Math]::Round($script:ImageTop, 1),
+      $logLeft, $logTop, $logAnchorX, $logAnchorY,
       $script:FrameCellRow, $script:FrameCellCol)
     return $true
   } catch {
@@ -956,6 +1025,7 @@ $script:LastWaitingSeq = -1
 $script:LastCelebrateSeq = -1
 $script:Waiting = 0
 $script:PageVisible = $null
+$script:LastVisibilityReason = ''
 $script:LastSoundAllowed = $false
 $script:SallyAvailable = $true
 $script:DoneAvailable = $true
@@ -986,10 +1056,17 @@ if ($null -ne $script:InitialState) {
   $script:LastCelebrateSeq = Get-StateInt $script:InitialState 'celebrateSeq'
   $script:Waiting = Get-StateInt $script:InitialState 'waiting'
   $script:PageVisible = Get-StateBool $script:InitialState 'pageVisible'
+  $initialTopmost = Get-StateBool $script:InitialState 'overlayTopmost'
+  if ($null -ne $initialTopmost) { $script:OverlayTopmost = $initialTopmost }
+  $initialAlways = Get-StateBool $script:InitialState 'overlayAlwaysShow'
+  if ($null -ne $initialAlways) { $script:AlwaysShow = $initialAlways }
   $script:SallyAvailable = -not [string]::IsNullOrEmpty((Get-StateString $script:InitialState 'sallyUrl'))
   $script:DoneAvailable = -not [string]::IsNullOrEmpty((Get-StateString $script:InitialState 'doneUrl'))
   $script:Baseline = $true
 }
+
+# Apply persisted options to the window created above (Topmost starts true).
+try { $script:Window.Topmost = [bool]$script:OverlayTopmost } catch { }
 
 function Show-Frame {
   try {
@@ -1346,10 +1423,49 @@ function Invoke-OpenDsh {
   }
 }
 
+function Send-OverlayOption([hashtable]$Option) {
+  try {
+    $json = $Option | ConvertTo-Json -Compress
+    $uri = $Origin.TrimEnd('/') + '/duo-pet/overlay-option'
+    $null = Invoke-RestMethod -Uri $uri -Method Post -ContentType 'application/json' -Body $json -TimeoutSec 2
+    Write-Log ('overlay-option posted: ' + $json)
+  } catch {
+    Write-Log ('overlay-option post failed: ' + $_.Exception.Message)
+  }
+}
+
 function Apply-State($State) {
   if ($null -eq $State) { return }
   $spriteUrl = Get-StateString $State 'spriteUrl'
   $script:PageVisible = Get-StateBool $State 'pageVisible'
+  $hostTopmost = Get-StateBool $State 'overlayTopmost'
+  if ($null -ne $hostTopmost) {
+    $script:OverlayTopmost = $hostTopmost
+    if ($null -ne $script:Window -and ([bool]$script:Window.Topmost -ne [bool]$hostTopmost)) {
+      $script:Window.Topmost = [bool]$hostTopmost
+      Write-Log ('topmost applied from host: {0}' -f $script:OverlayTopmost)
+    }
+    if ($null -ne $script:TopmostItem) {
+      if ($script:OverlayTopmost) {
+        $script:TopmostItem.Header = Get-MenuLabel 'topmostOff' 'Unpin topmost'
+      } else {
+        $script:TopmostItem.Header = Get-MenuLabel 'topmostOn' 'Pin topmost'
+      }
+    }
+  }
+  $hostAlways = Get-StateBool $State 'overlayAlwaysShow'
+  if ($null -ne $hostAlways -and [bool]$hostAlways -ne [bool]$script:AlwaysShow) {
+    $script:AlwaysShow = [bool]$hostAlways
+    if ($null -ne $script:AlwaysItem) {
+      if ($script:AlwaysShow) {
+        $script:AlwaysItem.Header = Get-MenuLabel 'alwaysShowOff' 'Only while minimized'
+      } else {
+        $script:AlwaysItem.Header = Get-MenuLabel 'alwaysShowOn' 'Always show'
+      }
+    }
+    Write-Log ('overlay always-show applied from host: {0}' -f $script:AlwaysShow)
+    Update-Visibility
+  }
   $script:SallyAvailable = -not [string]::IsNullOrEmpty((Get-StateString $State 'sallyUrl'))
   $script:DoneAvailable = -not [string]::IsNullOrEmpty((Get-StateString $State 'doneUrl'))
   if (-not [string]::IsNullOrEmpty($spriteUrl) -and $spriteUrl -ne $script:LastSpriteUrl) {
@@ -1495,6 +1611,10 @@ $script:Window.Add_MouseLeftButtonUp({
     $clamped = Clamp-Position $script:Window.Left $personTop $script:PersonW $script:PersonH
     $script:Window.Left = $clamped[0]
     $script:Window.Top = $clamped[1] - [double]$script:BubbleExtra
+    $totalClamped = Get-ClampedWindowPosition $script:Window.Left $script:Window.Top ([Math]::Max([double]$script:PersonW, [double]$script:Window.Width)) ([Math]::Max([double]($script:PersonH + $script:BubbleExtra), [double]$script:Window.Height))
+    $script:Window.Left = $totalClamped[0]
+    $script:Window.Top = $totalClamped[1]
+    Update-AnchorFromWindow
     Save-Position
     Write-Log ('drag end (moved) at person={0},{1} window={2},{3} extra={4}' -f
       [int]$script:Window.Left, [int]$personTop, [int]$script:Window.Left, [int]$script:Window.Top, $script:BubbleExtra)
@@ -1587,27 +1707,38 @@ $script:IdleItem.Add_Click({
 [void]$script:Menu.Items.Add((New-Object System.Windows.Controls.Separator))
 
 $script:TopmostItem = New-Object System.Windows.Controls.MenuItem
-$script:TopmostItem.Header = Get-MenuLabel 'topmostOff' 'Unpin topmost'
+if ($script:OverlayTopmost) {
+  $script:TopmostItem.Header = Get-MenuLabel 'topmostOff' 'Unpin topmost'
+} else {
+  $script:TopmostItem.Header = Get-MenuLabel 'topmostOn' 'Pin topmost'
+}
 $script:TopmostItem.Add_Click({
-  $script:Window.Topmost = -not $script:Window.Topmost
-  if ($script:Window.Topmost) {
+  $newTopmost = -not [bool]$script:Window.Topmost
+  $script:Window.Topmost = $newTopmost
+  $script:OverlayTopmost = $newTopmost
+  if ($newTopmost) {
     $script:TopmostItem.Header = Get-MenuLabel 'topmostOff' 'Unpin topmost'
   } else {
     $script:TopmostItem.Header = Get-MenuLabel 'topmostOn' 'Pin topmost'
   }
+  Send-OverlayOption @{ topmost = $newTopmost }
 })
 [void]$script:Menu.Items.Add($script:TopmostItem)
 
 $script:AlwaysItem = New-Object System.Windows.Controls.MenuItem
-$script:AlwaysItem.Header = Get-MenuLabel 'alwaysShowOn' 'Always show'
+if ($script:AlwaysShow) {
+  $script:AlwaysItem.Header = Get-MenuLabel 'alwaysShowOff' 'Only while minimized'
+} else {
+  $script:AlwaysItem.Header = Get-MenuLabel 'alwaysShowOn' 'Always show'
+}
 $script:AlwaysItem.Add_Click({
-  $script:AlwaysShow = -not $script:AlwaysShow
+  $script:AlwaysShow = -not [bool]$script:AlwaysShow
   if ($script:AlwaysShow) {
     $script:AlwaysItem.Header = Get-MenuLabel 'alwaysShowOff' 'Only while minimized'
-    $script:Window.Show()
   } else {
     $script:AlwaysItem.Header = Get-MenuLabel 'alwaysShowOn' 'Always show'
   }
+  Send-OverlayOption @{ alwaysShow = [bool]$script:AlwaysShow }
   Update-Visibility
 })
 [void]$script:Menu.Items.Add($script:AlwaysItem)
@@ -1697,15 +1828,47 @@ $script:LifeTimer.Add_Tick({
 })
 
 function Update-Visibility {
-  $shown = Test-DshWindowVisible -DshPid $DshPid -DshProcessName $DshProcessName -TitleHint $TitleHint
-  $shouldShow = $script:AlwaysShow -or $script:DebugPaint -or (-not $shown)
-  if ($script:DebugEventHidden) { $shouldShow = $false }
+  # Visibility ownership is driven by the page first:
+  #   pageVisible=true  -> overlay always hides (only ONE pet: the in-page one)
+  #   pageVisible=false -> overlay shows (page hidden/minimized/tab switched)
+  #   pageVisible=null  -> older Host/no report: fall back to the DSH window probe
+  # -AlwaysShow / -DebugPaint are explicit user/test overrides.
+  $pageVisible = $script:PageVisible
+  if ($null -ne $script:DebugPageVisibleOverride) { $pageVisible = $script:DebugPageVisibleOverride }
+  $shouldShow = $false
+  $reason = ''
+  if ($script:DebugEventHidden) {
+    $shouldShow = $false
+    $reason = 'debug hidden'
+  } elseif ($script:DebugPaint) {
+    $shouldShow = $true
+    $reason = 'debug paint'
+  } elseif ($script:AlwaysShow) {
+    $shouldShow = $true
+    $reason = 'always show'
+  } elseif ($pageVisible -eq $true) {
+    $shouldShow = $false
+    $reason = 'page visible'
+  } elseif ($pageVisible -eq $false) {
+    $shouldShow = $true
+    $reason = 'page hidden'
+  } else {
+    $shown = Test-DshWindowVisible -DshPid $DshPid -DshProcessName $DshProcessName -TitleHint $TitleHint
+    if ($shown) {
+      $shouldShow = $false
+      $reason = 'dsh window visible (fallback)'
+    } else {
+      $shouldShow = $true
+      $reason = 'dsh window minimized or hidden (fallback)'
+    }
+  }
   try {
-    if ($shouldShow -and -not $script:Window.IsVisible) {
+    $wasVisible = [bool]$script:Window.IsVisible
+    if ($shouldShow -and -not $wasVisible) {
       $script:Window.Show()
-      Write-Log 'shown (dsh window minimized or hidden); no queued sound replay'
+      Update-AnchorFromWindow
       Write-WindowState 'shown'
-    } elseif (-not $shouldShow -and $script:Window.IsVisible) {
+    } elseif (-not $shouldShow -and $wasVisible) {
       $script:Window.Hide()
       # While hidden the in-page pet normally owns audio and the bubble. When the page
       # itself reports hidden, the overlay keeps audio ownership, so only stop sounds
@@ -1713,12 +1876,23 @@ function Update-Visibility {
       if ($script:PageVisible -ne $false) {
         Stop-OverlaySound
         $script:LastSoundAllowed = $false
-        Write-Log 'hidden (dsh window visible); sound stopped, pending sounds dropped'
+        Write-Log 'hidden: sound stopped, pending sounds dropped'
       } else {
-        Write-Log 'hidden (dsh window visible) but pageVisible=False: keep playing sound'
+        Write-Log 'hidden but pageVisible=False: keep playing sound'
       }
       Hide-Bubble ''
       Write-WindowState 'hidden'
+    }
+    # Log the effective reason once per change (also when the window was already in
+    # that state, e.g. startup with pageVisible=true): tests/ops look for exactly
+    # "hidden (page visible)" / "shown (page hidden)".
+    if ($script:LastVisibilityReason -ne $reason) {
+      $script:LastVisibilityReason = $reason
+      if ($shouldShow) {
+        Write-Log ('shown ({0}); no queued sound replay' -f $reason)
+      } else {
+        Write-Log ('hidden ({0})' -f $reason)
+      }
     }
   } catch {
     Write-Log ('visibility update failed: ' + $_.Exception.Message)
@@ -1748,6 +1922,7 @@ try {
   $clamped = Clamp-Position $left $top $script:Window.Width $script:Window.Height $margin
   $script:Window.Left = $clamped[0]
   $script:Window.Top = $clamped[1]
+  Update-AnchorFromWindow
   Write-Log ('initial position ({0}): left={1} top={2} (virtual={3}x{4} at {5},{6}, margin={7})' -f
     $positionSource, [int]$script:Window.Left, [int]$script:Window.Top,
     [System.Windows.SystemParameters]::VirtualScreenWidth, [System.Windows.SystemParameters]::VirtualScreenHeight,

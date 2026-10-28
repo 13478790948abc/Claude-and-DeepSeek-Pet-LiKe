@@ -43,6 +43,9 @@ window.__ModuleLoader__.load({
     const STATE_URL = '/duo-pet/state'
     // 页面可见性上报：桌面悬浮层据此判断「页内是否能出声」。
     const VISIBILITY_URL = '/duo-pet/page-visibility'
+    // 页内右键菜单与桌面悬浮层联动的两个 Host 接口。
+    const MINIMIZE_URL = '/duo-pet/minimize'
+    const OVERLAY_OPTION_URL = '/duo-pet/overlay-option'
     const DEFAULT_SPRITE_URL = '/duo-pet/spritesheet.png?rev=2'
     // 浏览器对 PNG 路由有 24h 缓存；换图后用 query 参数强制重新下载（路由按路径精确匹配，忽略 query）。
     const ART_CACHE_BUST = 'v3'
@@ -111,7 +114,15 @@ window.__ModuleLoader__.load({
       'menu.snuggle': '贴贴',
       'menu.celebrate': '庆祝',
       'menu.idle': '待机',
+      'menu.minimizeDsh': '最小化 DSH',
+      'menu.action': '动作',
+      'menu.topmost': '置顶',
+      'menu.alwaysShow': '总是显示',
+      'menu.closePet': '关闭桌宠',
+      'menu.untopmost': '取消置顶',
+      'menu.cancelAlwaysShow': '取消总是显示',
       'bubble.dragging': '别拖我啦～',
+      'bubble.closed': '桌宠已关闭，刷新页面可恢复',
     }
 
     const enDict = {
@@ -123,7 +134,15 @@ window.__ModuleLoader__.load({
       'menu.snuggle': 'Snuggle',
       'menu.celebrate': 'Celebrate',
       'menu.idle': 'Idle',
+      'menu.minimizeDsh': 'Minimize DSH',
+      'menu.action': 'Action',
+      'menu.topmost': 'Always on top',
+      'menu.alwaysShow': 'Always show',
+      'menu.closePet': 'Close pet',
+      'menu.untopmost': 'Unpin topmost',
+      'menu.cancelAlwaysShow': 'Stop always-show',
       'bubble.dragging': "Don't drag me~",
+      'bubble.closed': 'Pet closed — refresh the page to bring it back',
     }
 
     // 所有选择器都带 .duopet- 前缀，<style> 只作用于本插件节点。
@@ -230,6 +249,42 @@ window.__ModuleLoader__.load({
 .duopet-menu-item:hover {
   background: rgba(255, 214, 196, 0.75);
 }
+.duopet-menu-label {
+  padding: 3px 10px 1px;
+  font-size: 11px;
+  color: #8a7f76;
+  text-align: left;
+  user-select: none;
+}
+.duopet-menu-sub {
+  padding-left: 22px;
+}
+.duopet-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: rgba(214, 176, 150, 0.45);
+}
+.duopet-menu-parent {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.duopet-menu-arrow {
+  font-size: 10px;
+  color: #8a7f76;
+}
+.duopet-submenu {
+  position: absolute;
+  left: calc(100% + 2px);
+  top: 28px;
+  min-width: 84px;
+  padding: 4px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid rgba(214, 176, 150, 0.6);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.18), 0 1px 2px rgba(0, 0, 0, 0.06);
+}
 @media (prefers-reduced-motion: reduce) {
   .duopet-sprite {
     transition: none;
@@ -331,6 +386,8 @@ window.__ModuleLoader__.load({
         spriteUrl: toUrl(source.spriteUrl),
         sallyUrl: toUrl(source.sallyUrl),
         doneUrl: toUrl(source.doneUrl),
+        overlayTopmost: source.overlayTopmost === false ? false : true,
+        overlayAlwaysShow: source.overlayAlwaysShow === true,
       }
     }
 
@@ -345,6 +402,8 @@ window.__ModuleLoader__.load({
       && left.spriteUrl === right.spriteUrl
       && left.sallyUrl === right.sallyUrl
       && left.doneUrl === right.doneUrl
+      && left.overlayTopmost === right.overlayTopmost
+      && left.overlayAlwaysShow === right.overlayAlwaysShow
     )
 
     const INITIAL_HOST_STATE = {
@@ -358,6 +417,8 @@ window.__ModuleLoader__.load({
       spriteUrl: DEFAULT_SPRITE_URL,
       sallyUrl: null,
       doneUrl: null,
+      overlayTopmost: true,
+      overlayAlwaysShow: false,
     }
 
     const resolveService = (ctx, name) => {
@@ -459,6 +520,8 @@ window.__ModuleLoader__.load({
           const [dragging, setDragging] = React.useState(false)
           const [bubble, setBubble] = React.useState(null)
           const [menu, setMenu] = React.useState(null)
+          const [petClosed, setPetClosed] = React.useState(false)
+          const [subOpen, setSubOpen] = React.useState(false)
 
           const playbackRef = React.useRef('idle')
           const waitingRef = React.useRef(0)
@@ -652,7 +715,25 @@ window.__ModuleLoader__.load({
             if (playbackRef.current !== 'done') startPlayback('snuggle')
           }
 
-          // ---------- 右键菜单（页内桌宠）：贴贴 / 庆祝 / 待机 ----------
+          // ---------- 右键菜单（页内桌宠）：最小化 DSH / 动作 / 置顶 / 总是显示 / 关闭桌宠 ----------
+          const postJson = (url, body) => {
+            if (typeof fetch !== 'function') return
+            try {
+              const request = fetch(url, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify(body === undefined ? {} : body),
+                keepalive: true,
+                cache: 'no-store',
+              })
+              if (request !== undefined && request !== null && typeof request.then === 'function') {
+                request.then(() => {}, () => {})
+              }
+            } catch (error) {
+              // best effort
+            }
+          }
+
           const openMenu = (event) => {
             if (typeof event.preventDefault === 'function') event.preventDefault()
             const element = event.currentTarget
@@ -667,6 +748,22 @@ window.__ModuleLoader__.load({
 
           const runMenuAction = (action) => {
             setMenu(null)
+            if (action === 'minimize') {
+              postJson(MINIMIZE_URL, {})
+              return
+            }
+            if (action === 'topmost') {
+              postJson(OVERLAY_OPTION_URL, { topmost: host.overlayTopmost !== true })
+              return
+            }
+            if (action === 'alwaysShow') {
+              postJson(OVERLAY_OPTION_URL, { alwaysShow: host.overlayAlwaysShow !== true })
+              return
+            }
+            if (action === 'closePet') {
+              setPetClosed(true)
+              return
+            }
             if (action === 'celebrate') {
               triggerCelebrate()
               return
@@ -1158,28 +1255,79 @@ window.__ModuleLoader__.load({
               onPointerDown: (event) => {
                 if (typeof event.stopPropagation === 'function') event.stopPropagation()
               },
+              onPointerLeave: () => {
+                setSubOpen(false)
+              },
             }, [
               h('button', {
-                key: 'snuggle',
+                key: 'minimize',
                 type: 'button',
                 role: 'menuitem',
                 className: 'duopet-menu-item',
-                onClick: () => runMenuAction('snuggle'),
-              }, translate('menu.snuggle')),
+                onClick: () => runMenuAction('minimize'),
+              }, translate('menu.minimizeDsh')),
               h('button', {
-                key: 'celebrate',
+                key: 'action',
                 type: 'button',
                 role: 'menuitem',
-                className: 'duopet-menu-item',
-                onClick: () => runMenuAction('celebrate'),
-              }, translate('menu.celebrate')),
+                className: 'duopet-menu-item duopet-menu-parent',
+                onPointerEnter: () => {
+                  setSubOpen(true)
+                },
+                onClick: () => {
+                  setSubOpen((current) => !current)
+                },
+              }, [translate('menu.action'), h('span', { key: 'arrow', className: 'duopet-menu-arrow' }, '▸')]),
+              subOpen ? h('div', {
+                key: 'submenu',
+                className: 'duopet-submenu',
+                role: 'menu',
+              }, [
+                h('button', {
+                  key: 'snuggle',
+                  type: 'button',
+                  role: 'menuitem',
+                  className: 'duopet-menu-item',
+                  onClick: () => runMenuAction('snuggle'),
+                }, translate('menu.snuggle')),
+                h('button', {
+                  key: 'celebrate',
+                  type: 'button',
+                  role: 'menuitem',
+                  className: 'duopet-menu-item',
+                  onClick: () => runMenuAction('celebrate'),
+                }, translate('menu.celebrate')),
+                h('button', {
+                  key: 'idle',
+                  type: 'button',
+                  role: 'menuitem',
+                  className: 'duopet-menu-item',
+                  onClick: () => runMenuAction('idle'),
+                }, translate('menu.idle')),
+              ]) : null,
+              h('div', { key: 'sep1', className: 'duopet-menu-sep' }),
               h('button', {
-                key: 'idle',
+                key: 'topmost',
                 type: 'button',
                 role: 'menuitem',
                 className: 'duopet-menu-item',
-                onClick: () => runMenuAction('idle'),
-              }, translate('menu.idle')),
+                onClick: () => runMenuAction('topmost'),
+              }, host.overlayTopmost === true ? translate('menu.untopmost') : translate('menu.topmost')),
+              h('button', {
+                key: 'alwaysShow',
+                type: 'button',
+                role: 'menuitem',
+                className: 'duopet-menu-item',
+                onClick: () => runMenuAction('alwaysShow'),
+              }, host.overlayAlwaysShow === true ? translate('menu.cancelAlwaysShow') : translate('menu.alwaysShow')),
+              h('div', { key: 'sep2', className: 'duopet-menu-sep' }),
+              h('button', {
+                key: 'closePet',
+                type: 'button',
+                role: 'menuitem',
+                className: 'duopet-menu-item',
+                onClick: () => runMenuAction('closePet'),
+              }, translate('menu.closePet')),
             ]))
           }
 
@@ -1246,6 +1394,9 @@ window.__ModuleLoader__.load({
               },
             }))
           }
+
+          // 「关闭桌宠」：本次页面会话内隐藏桌宠（刷新页面恢复）。
+          if (petClosed) return null
 
           return h('div', {
             className: 'duopet-root',

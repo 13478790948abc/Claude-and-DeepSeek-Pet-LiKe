@@ -7,11 +7,19 @@
     "sally": "盐津虾嘛",
     "done": "任务完成了",
     "hint": "点我一下嘛～",
-    "dragging": "别拖我啦～"
+    "dragging": "别拖我啦～",
+    "closed": "桌宠已关闭，刷新页面可恢复"
   },
   "menu": {
     "snuggle": "贴贴",
     "celebrate": "庆祝",
-    "idle": "待机"
+    "idle": "待机",
+    "minimizeDsh": "最小化 DSH",
+    "action": "动作",
+    "topmost": "置顶",
+    "untopmost": "取消置顶",
+    "alwaysShow": "总是显示",
+    "cancelAlwaysShow": "取消总是显示",
+    "closePet": "关闭桌宠"
   }
 }

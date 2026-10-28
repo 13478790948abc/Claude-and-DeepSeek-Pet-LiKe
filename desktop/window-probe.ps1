@@ -250,3 +250,73 @@ function Restore-DshWindow {
   }
   return $result
 }
+
+# ---------------- CLI action mode (used by the Host minimize route) ----------------
+# The Host runs: powershell -File window-probe.ps1 -Action minimize -DshPid 0
+#                -TitleHint "DeepSeek Harness,DSH"
+# Dot-sourcing this file (the overlay does that) passes no -Action, so this block is a
+# no-op there. Named arguments are parsed from $args to avoid a param block overriding
+# the overlay's own $DshPid/$TitleHint variables when this file is dot-sourced.
+$probeAction = ''
+$probeDshPid = 0
+$probeDshProcessName = 'DeepSeek Harness'
+$probeTitleHint = 'DeepSeek Harness'
+$probeResultPath = ''
+if ($null -ne $args -and $args.Count -gt 0) {
+  for ($probeIndex = 0; $probeIndex -lt $args.Count; $probeIndex++) {
+    $probeName = [string]$args[$probeIndex]
+    $probeValue = ''
+    if (($probeIndex + 1) -lt $args.Count) { $probeValue = [string]$args[$probeIndex + 1] }
+    switch ($probeName) {
+      '-Action' { $probeAction = $probeValue; $probeIndex += 1 }
+      '-DshPid' { if ($probeValue -match '^\d+$') { $probeDshPid = [int]$probeValue }; $probeIndex += 1 }
+      '-DshProcessName' { $probeDshProcessName = $probeValue; $probeIndex += 1 }
+      '-TitleHint' { $probeTitleHint = $probeValue; $probeIndex += 1 }
+      '-ResultPath' { $probeResultPath = $probeValue; $probeIndex += 1 }
+    }
+  }
+}
+
+if (-not [string]::IsNullOrEmpty($probeAction)) {
+  $actionResult = [pscustomobject]@{
+    ok = $false
+    found = $false
+    minimized = $false
+    restored = $false
+    error = ''
+  }
+  try {
+    $actionHandle = Find-DshWindowHandle -DshPid $probeDshPid -DshProcessName $probeDshProcessName -TitleHint $probeTitleHint
+    if ($actionHandle -eq [IntPtr]::Zero) {
+      $actionResult.error = 'window not found'
+    } else {
+      $actionResult.found = $true
+      if ($probeAction -eq 'minimize') {
+        [void][DuoPetWin32]::ShowWindow($actionHandle, 6) # SW_MINIMIZE
+        Start-Sleep -Milliseconds 120
+        $actionResult.minimized = [DuoPetWin32]::IsIconic($actionHandle)
+        $actionResult.ok = $actionResult.minimized
+      } elseif ($probeAction -eq 'restore') {
+        [void][DuoPetWin32]::ShowWindow($actionHandle, 9) # SW_RESTORE
+        Start-Sleep -Milliseconds 120
+        $actionResult.restored = -not [DuoPetWin32]::IsIconic($actionHandle)
+        $actionResult.ok = $actionResult.restored
+      } else {
+        $actionResult.error = 'unknown action'
+      }
+    }
+  } catch {
+    $actionResult.error = $_.Exception.Message
+  }
+  Write-Output ($actionResult | ConvertTo-Json -Compress)
+  if (-not [string]::IsNullOrEmpty($probeResultPath)) {
+    try {
+      $probeJson = $actionResult | ConvertTo-Json -Compress
+      # Write without a UTF-8 BOM: the Host JSON.parse() must not see it.
+      [System.IO.File]::WriteAllText($probeResultPath, $probeJson, (New-Object System.Text.UTF8Encoding($false)))
+    } catch {
+      # result file is best-effort (Host falls back to ok:false)
+    }
+  }
+  if ($actionResult.ok) { exit 0 } else { exit 1 }
+}

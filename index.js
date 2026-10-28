@@ -13,7 +13,7 @@
 // =============================================================================
 
 import { spawn } from 'node:child_process'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, statSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -22,6 +22,7 @@ const BUNDLE_DIR = dirname(fileURLToPath(import.meta.url))
 const ASSET_DIR = join(BUNDLE_DIR, 'assets')
 const DESKTOP_DIR = join(BUNDLE_DIR, 'desktop')
 const OVERLAY_SCRIPT = join(DESKTOP_DIR, 'pet-overlay.ps1')
+const WINDOW_PROBE_SCRIPT = join(DESKTOP_DIR, 'window-probe.ps1')
 const ROUTE_PREFIX = '/duo-pet'
 const POLL_MS = 500
 
@@ -157,6 +158,83 @@ function startDesktopOverlay(webServer) {
   return stop
 }
 
+let windowActionSeq = 0
+
+/**
+ * Run window-probe.ps1 in its CLI action mode (minimize/restore). Resolves to
+ * { ok, found, minimized } and never rejects: a missing window, timeout or failed
+ * spawn all degrade to ok:false so the HTTP route can always answer.
+ *
+ * The child writes its JSON result to a temp file and is spawned with stdio:'ignore'
+ * (piped stdio is blocked in the sandboxed Host: spawn EPERM on named pipes).
+ */
+function runWindowProbeAction(action) {
+  const empty = { ok: false, found: false, minimized: false }
+  return new Promise((resolve) => {
+    if (process.platform !== 'win32') {
+      resolve(empty)
+      return
+    }
+    if (!existsSync(WINDOW_PROBE_SCRIPT)) {
+      console.error('[duo-pet] desktop/window-probe.ps1 is missing; window action skipped')
+      resolve(empty)
+      return
+    }
+    windowActionSeq += 1
+    const resultPath = join(tmpdir(), `duo-pet-window-${String(process.pid)}-${String(windowActionSeq)}.json`)
+    try { unlinkSync(resultPath) } catch (error) { /* no stale file */ }
+    let child
+    try {
+      child = spawn('powershell.exe', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy', 'Bypass',
+        '-WindowStyle', 'Hidden',
+        '-File', WINDOW_PROBE_SCRIPT,
+        '-Action', action,
+        '-DshPid', '0',
+        '-TitleHint', 'DeepSeek Harness,DSH',
+        '-ResultPath', resultPath,
+      ], { stdio: 'ignore', windowsHide: true })
+    } catch (error) {
+      console.error('[duo-pet] failed to spawn window-probe action:', error)
+      resolve(empty)
+      return
+    }
+    let settled = false
+    const finish = (value) => {
+      if (settled) return
+      settled = true
+      try { unlinkSync(resultPath) } catch (error) { /* already gone */ }
+      resolve(value)
+    }
+    const timer = setTimeout(() => {
+      try { child.kill() } catch (error) { /* already gone */ }
+      finish(empty)
+    }, 8000)
+    child.on('error', (error) => {
+      clearTimeout(timer)
+      console.error('[duo-pet] window-probe action error:', error)
+      finish(empty)
+    })
+    child.on('close', () => {
+      clearTimeout(timer)
+      let parsed = null
+      try {
+        const text = readFileSync(resultPath, 'utf8').replace(/^\uFEFF/, '')
+        parsed = JSON.parse(text)
+      } catch (error) {
+        parsed = null
+      }
+      finish({
+        ok: parsed !== null && parsed.ok === true,
+        found: parsed !== null && parsed.found === true,
+        minimized: parsed !== null && parsed.minimized === true,
+      })
+    })
+  })
+}
+
 export function apply(ctx) {
   // Resolve a service through ctx.get first (the Cordis accessor) and fall back to a
   // direct property so fake/test contexts and compatible builds both work.
@@ -202,6 +280,10 @@ export function apply(ctx) {
   // the in-page pet may play sounds until the browser reports that its page is hidden.
   let pageVisible = true
   let pageVisibleAt = 0
+  // Desktop overlay options, shared with the Client/page menu and the overlay menu.
+  // Defaults match the overlay's own startup defaults (topmost on, always-show off).
+  let overlayTopmost = true
+  let overlayAlwaysShow = false
 
   const statuses = new Map() // agentKey -> 'running' | 'idle'
   const errored = new Set() // agentKey of agents whose last run errored
@@ -369,6 +451,8 @@ export function apply(ctx) {
     doneUrl: loadAsset('done.mp3') === null ? null : DONE_URL,
     pageVisible,
     pageVisibleAt,
+    overlayTopmost,
+    overlayAlwaysShow,
     hits: { state: stateHits, sprite: spriteHits },
   })
 
@@ -484,6 +568,84 @@ export function apply(ctx) {
         pageVisibleAt = Date.now()
         console.log(`[duo-pet] page visibility: ${pageVisible ? 'visible' : 'hidden'}`)
         sendJsonStatus(response, 200, { ok: true, pageVisible, pageVisibleAt })
+      }).catch(() => {
+        try {
+          sendJsonStatus(response, 400, { error: 'invalid body' })
+        } catch (error) {
+          // response may already be finished
+        }
+      })
+    },
+  }))
+
+  // Client page menu: minimize the DSH main window. Runs window-probe.ps1 in its CLI
+  // action mode so the Host itself never touches Win32 APIs. A missing window is a
+  // normal {ok:false,found:false,minimized:false} answer, not an HTTP error.
+  routes.push(webServer.register({
+    kind: 'exact',
+    path: `${ROUTE_PREFIX}/minimize`,
+    handler: (request, response) => {
+      const method = typeof request.method === 'string' ? request.method.toUpperCase() : ''
+      if (method !== 'POST') {
+        sendJsonStatus(response, 405, { error: 'method not allowed' }, { Allow: 'POST' })
+        return
+      }
+      return runWindowProbeAction('minimize').then((result) => {
+        console.log(`[duo-pet] minimize dsh: ok=${result.ok} found=${result.found} minimized=${result.minimized}`)
+        sendJsonStatus(response, 200, { ok: result.ok, found: result.found, minimized: result.minimized })
+      }).catch(() => {
+        try {
+          sendJsonStatus(response, 200, { ok: false, found: false, minimized: false })
+        } catch (error) {
+          // response may already be finished
+        }
+      })
+    },
+  }))
+
+  // Shared overlay options: the page menu and the overlay's own context menu both POST
+  // here, and both the page and the desktop overlay read them from /duo-pet/state.
+  routes.push(webServer.register({
+    kind: 'exact',
+    path: `${ROUTE_PREFIX}/overlay-option`,
+    handler: (request, response) => {
+      const method = typeof request.method === 'string' ? request.method.toUpperCase() : ''
+      if (method !== 'POST') {
+        sendJsonStatus(response, 405, { error: 'method not allowed' }, { Allow: 'POST' })
+        return
+      }
+      return readJsonBody(request, 4096).then((payload) => {
+        if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+          sendJsonStatus(response, 400, { error: 'body must contain topmost/alwaysShow or toggleTopmost/toggleAlwaysShow booleans' })
+          return
+        }
+        const hasTopmost = Object.prototype.hasOwnProperty.call(payload, 'topmost')
+        const hasAlways = Object.prototype.hasOwnProperty.call(payload, 'alwaysShow')
+        // Backward compatibility with the in-page menu, which posts toggle flags
+        // ({toggleTopmost:true}/{toggleAlwaysShow:true}) instead of absolute values.
+        const hasToggleTopmost = Object.prototype.hasOwnProperty.call(payload, 'toggleTopmost')
+        const hasToggleAlways = Object.prototype.hasOwnProperty.call(payload, 'toggleAlwaysShow')
+        if (!hasTopmost && !hasAlways && !hasToggleTopmost && !hasToggleAlways) {
+          sendJsonStatus(response, 400, { error: 'body must contain topmost/alwaysShow or toggleTopmost/toggleAlwaysShow booleans' })
+          return
+        }
+        for (const [name, present] of [
+          ['topmost', hasTopmost],
+          ['alwaysShow', hasAlways],
+          ['toggleTopmost', hasToggleTopmost],
+          ['toggleAlwaysShow', hasToggleAlways],
+        ]) {
+          if (present && typeof payload[name] !== 'boolean') {
+            sendJsonStatus(response, 400, { error: `${name} must be a boolean` })
+            return
+          }
+        }
+        if (hasTopmost) overlayTopmost = payload.topmost
+        if (hasAlways) overlayAlwaysShow = payload.alwaysShow
+        if (hasToggleTopmost && payload.toggleTopmost === true) overlayTopmost = !overlayTopmost
+        if (hasToggleAlways && payload.toggleAlwaysShow === true) overlayAlwaysShow = !overlayAlwaysShow
+        console.log(`[duo-pet] overlay option: topmost=${overlayTopmost} alwaysShow=${overlayAlwaysShow}`)
+        sendJsonStatus(response, 200, { ok: true, overlayTopmost, overlayAlwaysShow })
       }).catch(() => {
         try {
           sendJsonStatus(response, 400, { error: 'invalid body' })
