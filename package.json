@@ -1,6 +1,6 @@
 {
-  "name": "dsh-duo-pet",
-  "version": "1.0.0",
+  "name": "@local/dsh-duo-pet",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "Claude × DeepSeek chibi desktop pet for the DeepSeek Harness Web UI: the two girls snuggle with hearts every 5 seconds, react to approval requests and task completions, and a transparent desktop overlay keeps them visible when the app window is minimized.",

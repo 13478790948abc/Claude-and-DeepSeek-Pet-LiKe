@@ -1,0 +1,49 @@
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Pillow
+        run: python -m pip install --upgrade pip pillow
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Contract checks (bundle)
+        run: node dev/verify-bundle.mjs --pkg "$PWD" --python python3
+
+      - name: Asset checks (spritesheet / icon / audio)
+        run: python3 dev/verify-assets.py --pkg "$PWD" --ffmpeg "$(command -v ffmpeg)" --json dev/assets-report.json
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-report
+          path: |
+            dev/report-latest.json
+            dev/assets-report.json
+          if-no-files-found: ignore
