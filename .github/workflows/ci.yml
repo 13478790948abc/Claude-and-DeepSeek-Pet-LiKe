@@ -33,7 +33,7 @@ jobs:
           sudo apt-get install -y ffmpeg
 
       - name: Contract checks (bundle)
-        run: node dev/verify-bundle.mjs --pkg "$PWD" --python python3
+        run: node dev/verify-bundle.mjs --pkg "$PWD" --python "$(command -v python3)"
 
       - name: Asset checks (spritesheet / icon / audio)
         run: python3 dev/verify-assets.py --pkg "$PWD" --ffmpeg "$(command -v ffmpeg)" --json dev/assets-report.json
