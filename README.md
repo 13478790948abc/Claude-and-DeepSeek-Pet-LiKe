@@ -1,6 +1,6 @@
 # Claude × DeepSeek 桌宠（DSH Web 插件）
 
-为 [DeepSeek Harness](https://github.com/deepseek-ai) 的 Web 界面做的双人桌宠插件：左边 **Claude**（橘发少女）、右边 **DeepSeek**（蓝发女仆），**每 5 秒两人贴贴 3 秒、中间冒爱心**；需要你授权/选择时 Claude 头顶气泡「盐津虾嘛」+ 播放提示音；任务完成时「任务完成了」+ 小跳星星；DSH 主窗口最小化时还有**桌面悬浮桌宠**。
+为 [DeepSeek Harness](https://github.com/deepseek-ai) 的 Web 界面做的双人桌宠插件：左边 **Claude**（橘发少女）、右边 **DeepSeek**（蓝发女仆），**每 5 秒两人贴贴 3 秒、中间冒爱心**；需要你授权/选择或任务完成时 Claude 头顶气泡「你盐津虾嘛」。DSH 主窗口最小化时还有**桌面悬浮桌宠**。
 
 ![贴贴预览](docs/preview-snuggle.png)
 
