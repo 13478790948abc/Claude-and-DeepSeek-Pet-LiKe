@@ -1,5 +1,9 @@
 # Claude × DeepSeek 桌宠（DSH Web 插件）
 
+[![verify](https://github.com/13478790948abc/Claude-and-DeepSeek-Pet-LiKe/actions/workflows/ci.yml/badge.svg)](https://github.com/13478790948abc/Claude-and-DeepSeek-Pet-LiKe/actions)
+[![release](https://img.shields.io/github/v/release/13478790948abc/Claude-and-DeepSeek-Pet-LiKe)](https://github.com/13478790948abc/Claude-and-DeepSeek-Pet-LiKe/releases)
+[![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 为 [DeepSeek Harness](https://github.com/deepseek-ai) 的 Web 界面做的双人桌宠插件：左边 **Claude**（橘发少女）、右边 **DeepSeek**（蓝发女仆），**每 5 秒两人贴贴 3 秒、中间冒爱心**；需要你授权/选择或任务完成时 Claude 头顶气泡「你盐津虾嘛」。DSH 主窗口最小化时还有**桌面悬浮桌宠**。
 
 ![贴贴预览](docs/preview-snuggle.png)
@@ -12,7 +16,8 @@
 | 需要授权 / 选择 | 气泡「盐津虾嘛」+ 播放 `assets/sally.mp3`（授权人声），立即贴贴一次；等待期间气泡保持 |
 | 任务完成 | 气泡「任务完成了」+ 播放 `assets/done.mp3` + `done` 小跳动画（缺失时回退浏览器 TTS） |
 | 点击 | 解锁音频并贴贴一次 |
-| 拖动 | 只有按在**人物可见像素**上才能拖；位置记忆（`localStorage`），窗口 resize 自动 clamp 回可视区 |
+| 拖动 | 只有按在**人物可见像素**上才能拖；页内位置记忆（`localStorage`），窗口 resize 自动 clamp 回可视区 |
+| 桌面悬浮层拖动 | 屏幕绝对坐标 + 每渲染周期合并，跟手不抖、无重影；拖动期间冻结动画，松手恢复 |
 | 右键 | **页内与桌面菜单一致**：最小化 DSH（页内）/ 打开 DSH（桌面）/ 动作 ▸ 贴贴·庆祝·待机 / 置顶（取消置顶）/ 总是显示（取消总是显示）/ 关闭桌宠 |
 | 桌面悬浮层 | DSH 页面可见时**自动隐藏**（页内只看得到一个桌宠）；最小化/切走时在桌面右下角显示透明置顶桌宠；窗口和命中区都**紧贴当前帧人物 bbox** |
 | 最小化 DSH | 页内右键「最小化 DSH」→ Host spawn `window-probe.ps1 -Action minimize` 最小化主窗口 |

@@ -2309,6 +2309,112 @@ function runSectionF(pkg) {
     return 'overlay: pageVisible=true -> hidden / false -> shown / null -> window-probe fallback; AlwaysShow override; ' +
       'overlayTopmost/overlayAlwaysShow applied from Host; menu options POST back to /duo-pet/overlay-option'
   })
+  check('F13', 'overlay drag smoothness: Begin/Update/End-OverlayDrag stop per-frame geometry work while dragging', () => {
+    const overlayAbs = join(PKG, 'desktop/pet-overlay.ps1')
+    assert.ok(exists(overlayAbs), 'desktop/pet-overlay.ps1 is missing')
+    const source = readText(overlayAbs)
+    const required = [
+      ['Begin-OverlayDrag', 'drag begin helper'],
+      ['Update-OverlayDrag', 'drag move helper'],
+      ['End-OverlayDrag', 'drag end helper'],
+      ['$script:Dragging', 'Dragging flag'],
+      ['-DebugAutoDrag', '-DebugAutoDrag test hook'],
+      ['FrameTimerWasEnabled', 'FrameTimer save/restore'],
+      ['AutoTimerWasEnabled', 'AutoTimer save/restore'],
+      ['drag end: animation/geometry resumed', 'drag resume log'],
+      ['drag end (moved)', 'drag end moved log'],
+      ['drag end (click, no move)', 'drag end click log'],
+      ['FrameTimer.Stop()', 'FrameTimer stopped on drag begin'],
+      ['FrameTimer.Start()', 'FrameTimer restored on drag end'],
+    ]
+    const missingTokens = required.filter(([token]) => !source.includes(token)).map(([, label]) => label)
+    assert.equal(missingTokens.length, 0, `pet-overlay.ps1 is missing: ${missingTokens.join(', ')}`)
+    // Show-Frame / FrameTimer tick / Update-BubbleGeometry must early-return while dragging.
+    assert.match(source, /function Show-Frame[\s\S]{0,400}?if \(\$script:Dragging\) \{ return \}/,
+      'Show-Frame does not early-return while dragging')
+    assert.match(source, /function Update-BubbleGeometry[\s\S]{0,200}?if \(\$script:Dragging\) \{ return \}/,
+      'Update-BubbleGeometry does not early-return while dragging')
+    assert.match(source, /\$script:FrameTimer\.Add_Tick\(\{\s*if \(\$script:Dragging\) \{ return \}/,
+      'FrameTimer tick does not early-return while dragging')
+    assert.match(source, /if \(\$script:CurrentAnim -eq 'idle' -and -not \$script:Dragging\)/,
+      'AutoTimer tick does not skip while dragging')
+    // Begin records absolute drag state and pauses frame work.
+    const beginBody = source.slice(source.indexOf('function Begin-OverlayDrag'), source.indexOf('function Apply-DragTarget'))
+    for (const token of ['FrameTimer.Stop()', 'AutoTimer.Stop()', 'DragCoalesceTimer.Start()', 'DragStartScreenX', 'WindowStart']) {
+      assert.ok(beginBody.includes(token), `Begin-OverlayDrag is missing ${token}`)
+    }
+    // Update only records the latest target; no window moves/geometry/logging per move.
+    const updateBody = source.slice(source.indexOf('function Update-OverlayDrag'), source.indexOf('function End-OverlayDrag'))
+    for (const token of ['$script:DragTargetScreenX =', '$script:DragTargetScreenY =', '$script:DragMoveSteps']) {
+      assert.ok(updateBody.includes(token), `Update-OverlayDrag is missing ${token}`)
+    }
+    for (const forbidden of ['$script:Window.Left', '$script:Window.Top', 'Apply-WindowGeometry', 'Update-HitSurface', 'Show-Frame', 'Write-Log', 'Clamp-Position']) {
+      assert.equal(updateBody.includes(forbidden), false,
+        `Update-OverlayDrag still does per-move work: ${forbidden}`)
+    }
+    // Apply-DragTarget does the single absolute move from the drag start.
+    const applyBody = source.slice(source.indexOf('function Apply-DragTarget'), source.indexOf('function Update-OverlayDrag'))
+    for (const token of ['WindowStart.X + $dx', 'WindowStart.Y + $dy', 'DragStartScreenX', 'DragStartScreenY', '$script:Window.Left =', '$script:Window.Top =']) {
+      assert.ok(applyBody.includes(token), `Apply-DragTarget is missing ${token}`)
+    }
+    // End does one clamp + anchor + geometry reflow + timer resume.
+    const endBody = source.slice(source.indexOf('function End-OverlayDrag'), source.indexOf('$script:Window.Add_MouseLeftButtonDown'))
+    for (const token of ['DragCoalesceTimer.Stop()', 'Apply-DragTarget', 'Get-ClampedWindowPosition', 'Clamp-Position', 'Update-AnchorFromWindow', 'Save-Position', 'Apply-WindowGeometry', 'FrameTimer.Start()']) {
+      assert.ok(endBody.includes(token), `End-OverlayDrag is missing ${token}`)
+    }
+    return 'overlay drag: Begin pauses FrameTimer/AutoTimer and records drag state; Update only stores the coalesced target; ' +
+      'Apply-DragTarget moves absolutely; Show-Frame/FrameTimer tick/Update-BubbleGeometry early-return on Dragging; ' +
+      'End clamps+anchors+saves+geometry+resumes; -DebugAutoDrag'
+  })
+  check('F14', 'overlay drag uses absolute screen coordinates + 8ms coalescing (no client-coordinate oscillation)', () => {
+    const overlayAbs = join(PKG, 'desktop/pet-overlay.ps1')
+    assert.ok(exists(overlayAbs), 'desktop/pet-overlay.ps1 is missing')
+    const source = readText(overlayAbs)
+    const required = [
+      ['Convert-ClientToScreenDip', 'client -> screen DIP conversion'],
+      ['PointToScreen', 'WPF PointToScreen'],
+      ['Get-OverlayDpiScale', 'DPI scale conversion'],
+      ['Apply-DragTarget', 'absolute drag target applier'],
+      ['DragCoalesceTimer', '8ms coalescing timer'],
+      ['DragStartScreenX', 'drag start screen X'],
+      ['DragStartScreenY', 'drag start screen Y'],
+      ['DragTargetScreenX', 'latest target screen X'],
+      ['DragTargetScreenY', 'latest target screen Y'],
+      ['drag move: cursor=', 'drag move log'],
+      ['Update-OverlayDrag', 'target-only move updater'],
+    ]
+    const missingTokens = required.filter(([token]) => !source.includes(token)).map(([, label]) => label)
+    assert.equal(missingTokens.length, 0, `pet-overlay.ps1 is missing: ${missingTokens.join(', ')}`)
+    const convertBody = source.slice(source.indexOf('function Convert-ClientToScreenDip'), source.indexOf('function Begin-OverlayDrag'))
+    assert.ok(convertBody.includes('PointToScreen'), 'Convert-ClientToScreenDip does not use PointToScreen')
+    assert.ok(convertBody.includes('/ $scale'), 'Convert-ClientToScreenDip does not convert device pixels to DIP')
+    const beginBody = source.slice(source.indexOf('function Begin-OverlayDrag'), source.indexOf('function Apply-DragTarget'))
+    for (const token of ['DragStartScreenX = [double]$ScreenX', 'DragStartScreenY = [double]$ScreenY', 'DragTargetScreenX = [double]$ScreenX', 'DragTargetScreenY = [double]$ScreenY', 'WindowStart = New-Object System.Windows.Point($script:Window.Left, $script:Window.Top)']) {
+      assert.ok(beginBody.includes(token), `Begin-OverlayDrag is missing ${token}`)
+    }
+    const applyBody = source.slice(source.indexOf('function Apply-DragTarget'), source.indexOf('function Update-OverlayDrag'))
+    assert.match(applyBody, /\$dx = \[double\]\$script:DragTargetScreenX - \[double\]\$script:DragStartScreenX/,
+      'Apply-DragTarget dx is not targetScreen - startScreen')
+    assert.match(applyBody, /\$dy = \[double\]\$script:DragTargetScreenY - \[double\]\$script:DragStartScreenY/,
+      'Apply-DragTarget dy is not targetScreen - startScreen')
+    assert.match(applyBody, /\$script:Window\.Left = \$script:WindowStart\.X \+ \$dx/,
+      'Apply-DragTarget Left is not startWindowLeft + dx')
+    assert.match(applyBody, /\$script:Window\.Top = \$script:WindowStart\.Y \+ \$dy/,
+      'Apply-DragTarget Top is not startWindowTop + dy')
+    assert.equal(/\$script:Window\.(Left|Top)\s*\+=/.test(source), false,
+      'incremental window position accumulation (+=) is still present')
+    assert.match(source, /DragCoalesceTimer\.Interval = .*FromMilliseconds\(8\)/,
+      'DragCoalesceTimer interval is not 8ms')
+    assert.match(source, /DragCoalesceTimer\.Add_Tick\(\{ Apply-DragTarget \}\)/,
+      'DragCoalesceTimer tick does not apply the latest drag target')
+    assert.match(source, /\(\$script:DragMoveSteps % 10\) -eq 0/,
+      'drag move log is not emitted every 10 steps')
+    assert.match(source, /Convert-ClientToScreenDip \$eventArgs\.GetPosition\(\$script:Window\)/,
+      'mouse move does not convert client coordinates to screen DIP')
+    return 'overlay drag: Convert-ClientToScreenDip(PointToScreen + DPI) + Begin(startScreen/windowStart) + ' +
+      'Apply-DragTarget(start + (target-start), absolute, no +=) + DragCoalesceTimer 8ms + every-10 drag-move log; ' +
+      'Update only stores the latest target (runtime monotonic test covered by engineering test-drag-smooth.ps1)'
+  })
 }
 
 // ---------------------------------------------------------------------------

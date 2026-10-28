@@ -43,6 +43,8 @@ Parameters:
                   freeze the idle animation while testing pixel hit testing)
   -DebugFreeze    Test-only: stop the frame timer after the first frame so the tight
                   window geometry stays stable for drag/right-click tests
+  -DebugAutoDrag  Test-only: run a 40-step synthetic drag through the same Begin/Update/
+                  End drag functions after startup (freeze/resume + 300+ px test)
 #>
 param(
   [string]$Origin = 'http://127.0.0.1:41810',
@@ -59,7 +61,8 @@ param(
   [switch]$DebugEventHidden,
   [string]$DebugPageVisible = '',
   [int]$DebugIdleMs = 0,
-  [switch]$DebugFreeze
+  [switch]$DebugFreeze,
+  [switch]$DebugAutoDrag
 )
 
 $ErrorActionPreference = 'Stop'
@@ -86,6 +89,9 @@ public static class DuoPetHitNative
 
     [DllImport("user32.dll")]
     public static extern bool ScreenToClient(IntPtr hWnd, ref POINT point);
+
+    [DllImport("user32.dll")]
+    public static extern bool GetCursorPos(out POINT point);
 
     public static int[] AlphaBounds(byte[] pixels, int width, int height, int threshold)
     {
@@ -493,6 +499,7 @@ function Measure-ClaudeHead {
 # Place the (collapsed by default) bubble root so its tail tip is BubbleHeadGap px
 # above Claude's head, horizontally centred on the tail.
 function Update-BubbleGeometry {
+  if ($script:Dragging) { return }
   if ($null -eq $script:BubbleRoot -or $null -eq $script:Window) { return }
   try {
     $head = Measure-ClaudeHead
@@ -1019,6 +1026,10 @@ $script:Dragging = $false
 $script:DragStart = $null
 $script:WindowStart = $null
 $script:DragMoved = $false
+# While dragging, the frame/auto timers are stopped so no sprite, hit-region or window
+# geometry work runs between mouse moves (that per-frame re-layout caused jank at 150%).
+$script:FrameTimerWasEnabled = $false
+$script:AutoTimerWasEnabled = $false
 $script:AlwaysShow = $false
 $script:Baseline = $false
 $script:LastWaitingSeq = -1
@@ -1070,6 +1081,8 @@ try { $script:Window.Topmost = [bool]$script:OverlayTopmost } catch { }
 
 function Show-Frame {
   try {
+    # Dragging must not touch Source/hit-region/window geometry at all.
+    if ($script:Dragging) { return }
     if ($null -eq $script:FrameImage) { return }
     if ($null -eq $script:Sheet) {
       if (-not $script:FrameErrorLogged) {
@@ -1564,45 +1577,83 @@ $script:Window.Add_ContextMenuOpening({
   Write-Log 'context-menu-opening'
 })
 
-$script:Window.Add_MouseLeftButtonDown({
-  param($sender, $eventArgs)
-  $position = $eventArgs.GetPosition($script:Window)
-  if (-not (Test-PetAlphaAtPoint $position.X $position.Y)) {
-    # Transparent padding does not start a drag (and the later click action is skipped).
-    $script:LeftPressOnPet = $false
-    Write-Log ('drag skipped (transparent pixel) at {0},{1}' -f [int]$position.X, [int]$position.Y)
-    return
+# Shared drag implementation (mouse handlers + -DebugAutoDrag both use these).
+# Positions are ABSOLUTE screen coordinates (DIP), never window-relative deltas: the
+# old client-coordinate delta flipped sign each time the window moved under the cursor,
+# which caused the visible oscillation/ghosting. Move events only update a target; a
+# CompositionTarget-rate timer applies the latest target at most once per tick.
+function Get-OverlayDpiScale {
+  try {
+    $scale = [System.Windows.Media.VisualTreeHelper]::GetDpi($script:Window).DpiScaleX
+    if ($scale -le 0) { $scale = 1.0 }
+    return [double]$scale
+  } catch {
+    return 1.0
   }
-  $script:LeftPressOnPet = $true
+}
+
+function Convert-ClientToScreenDip([System.Windows.Point]$ClientPoint) {
+  try {
+    $device = $script:Window.PointToScreen($ClientPoint)
+    $scale = Get-OverlayDpiScale
+    return @([double]($device.X / $scale), [double]($device.Y / $scale))
+  } catch {
+    return @(0.0, 0.0)
+  }
+}
+
+function Begin-OverlayDrag([double]$ScreenX, [double]$ScreenY) {
+  if ($script:Dragging) { return }
   $script:Dragging = $true
   $script:DragMoved = $false
-  $script:DragStart = $position
+  $script:DragStartScreenX = [double]$ScreenX
+  $script:DragStartScreenY = [double]$ScreenY
+  $script:DragTargetScreenX = [double]$ScreenX
+  $script:DragTargetScreenY = [double]$ScreenY
+  $script:DragMoveSteps = 0
+  $script:DragMoveLogPending = $false
   $script:WindowStart = New-Object System.Windows.Point($script:Window.Left, $script:Window.Top)
+  if ($null -ne $script:FrameTimer) {
+    $script:FrameTimerWasEnabled = [bool]$script:FrameTimer.IsEnabled
+    $script:FrameTimer.Stop()
+  }
+  if ($null -ne $script:AutoTimer) {
+    $script:AutoTimerWasEnabled = [bool]$script:AutoTimer.IsEnabled
+    $script:AutoTimer.Stop()
+  }
   [void]$script:Window.CaptureMouse()
-  Write-Log ('drag start at {0},{1} (alpha ok)' -f [int]$script:DragStart.X, [int]$script:DragStart.Y)
-})
+  if ($null -ne $script:DragCoalesceTimer) { $script:DragCoalesceTimer.Start() }
+  Write-Log ('drag start at screen {0},{1} (alpha ok)' -f [int]$ScreenX, [int]$ScreenY)
+}
 
-$script:Window.Add_MouseMove({
-  param($sender, $eventArgs)
+function Apply-DragTarget {
   if (-not $script:Dragging) { return }
-  $point = $eventArgs.GetPosition($script:Window)
-  $dx = $point.X - $script:DragStart.X
-  $dy = $point.Y - $script:DragStart.Y
+  $dx = [double]$script:DragTargetScreenX - [double]$script:DragStartScreenX
+  $dy = [double]$script:DragTargetScreenY - [double]$script:DragStartScreenY
   if ([Math]::Abs($dx) -gt 6 -or [Math]::Abs($dy) -gt 6) { $script:DragMoved = $true }
+  # Absolute target from the drag start; no per-move accumulation.
   $script:Window.Left = $script:WindowStart.X + $dx
   $script:Window.Top = $script:WindowStart.Y + $dy
-})
-
-$script:Window.Add_MouseLeftButtonUp({
-  param($sender, $eventArgs)
-  if (-not $script:Dragging) {
-    if (-not $script:LeftPressOnPet) {
-      Write-Log 'left click skipped (transparent pixel)'
-    }
-    $script:LeftPressOnPet = $false
-    return
+  if ($script:DragMoveLogPending) {
+    $script:DragMoveLogPending = $false
+    Write-Log ('drag move: cursor={0},{1} left={2} top={3}' -f
+      [int]$script:DragTargetScreenX, [int]$script:DragTargetScreenY,
+      [int]$script:Window.Left, [int]$script:Window.Top)
   }
-  $script:LeftPressOnPet = $false
+}
+
+function Update-OverlayDrag([double]$ScreenX, [double]$ScreenY) {
+  if (-not $script:Dragging) { return }
+  $script:DragTargetScreenX = [double]$ScreenX
+  $script:DragTargetScreenY = [double]$ScreenY
+  $script:DragMoveSteps += 1
+  if (($script:DragMoveSteps % 10) -eq 0) { $script:DragMoveLogPending = $true }
+}
+
+function End-OverlayDrag {
+  if (-not $script:Dragging) { return }
+  if ($null -ne $script:DragCoalesceTimer) { $script:DragCoalesceTimer.Stop() }
+  Apply-DragTarget
   $script:Dragging = $false
   [void]$script:Window.ReleaseMouseCapture()
   if ($script:DragMoved) {
@@ -1618,10 +1669,59 @@ $script:Window.Add_MouseLeftButtonUp({
     Save-Position
     Write-Log ('drag end (moved) at person={0},{1} window={2},{3} extra={4}' -f
       [int]$script:Window.Left, [int]$personTop, [int]$script:Window.Left, [int]$script:Window.Top, $script:BubbleExtra)
+    [void](Apply-WindowGeometry 'drag end')
   } else {
     Write-Log 'drag end (click, no move)'
     if ($script:CurrentAnim -ne 'done') { Start-Action 'snuggle' }
   }
+  if ($script:FrameTimerWasEnabled -and $null -ne $script:FrameTimer -and -not $script:FrameTimer.IsEnabled) {
+    $script:FrameTimer.Start()
+  }
+  if ($script:AutoTimerWasEnabled -and $script:CurrentAnim -eq 'idle' -and $null -ne $script:AutoTimer -and -not $script:AutoTimer.IsEnabled) {
+    $script:AutoTimer.Start()
+  }
+  $script:FrameTimerWasEnabled = $false
+  $script:AutoTimerWasEnabled = $false
+  Write-Log 'drag end: animation/geometry resumed'
+}
+
+# Mix high-frequency mouse moves down to at most one window move per ~8ms tick.
+$script:DragCoalesceTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:DragCoalesceTimer.Interval = [TimeSpan]::FromMilliseconds(8)
+$script:DragCoalesceTimer.Add_Tick({ Apply-DragTarget })
+
+$script:Window.Add_MouseLeftButtonDown({
+  param($sender, $eventArgs)
+  $position = $eventArgs.GetPosition($script:Window)
+  if (-not (Test-PetAlphaAtPoint $position.X $position.Y)) {
+    # Transparent padding does not start a drag (and the later click action is skipped).
+    $script:LeftPressOnPet = $false
+    Write-Log ('drag skipped (transparent pixel) at {0},{1}' -f [int]$position.X, [int]$position.Y)
+    return
+  }
+  $script:LeftPressOnPet = $true
+  $screen = Convert-ClientToScreenDip $position
+  Begin-OverlayDrag $screen[0] $screen[1]
+})
+
+$script:Window.Add_MouseMove({
+  param($sender, $eventArgs)
+  if (-not $script:Dragging) { return }
+  $screen = Convert-ClientToScreenDip $eventArgs.GetPosition($script:Window)
+  Update-OverlayDrag $screen[0] $screen[1]
+})
+
+$script:Window.Add_MouseLeftButtonUp({
+  param($sender, $eventArgs)
+  if (-not $script:Dragging) {
+    if (-not $script:LeftPressOnPet) {
+      Write-Log 'left click skipped (transparent pixel)'
+    }
+    $script:LeftPressOnPet = $false
+    return
+  }
+  $script:LeftPressOnPet = $false
+  End-OverlayDrag
 })
 
 function Clamp-Position([double]$Left, [double]$Top, [double]$Width, [double]$Height, [double]$Margin = 0) {
@@ -1769,6 +1869,7 @@ Write-Log ('context menu ready: items={0} actions={1}' -f $script:Menu.Items.Cou
 $script:FrameTimer = New-Object System.Windows.Threading.DispatcherTimer
 $script:FrameTimer.Interval = [TimeSpan]::FromMilliseconds(250)
 $script:FrameTimer.Add_Tick({
+  if ($script:Dragging) { return }
   $spec = $script:Animations[$script:CurrentAnim]
   if ($null -eq $spec) { $spec = $script:Animations['idle'] }
   $script:FrameIndex++
@@ -2015,6 +2116,46 @@ if (-not [string]::IsNullOrEmpty($DebugEvent)) {
   })
   $script:DebugEventTimer.Start()
   Write-Log ('debug event timer started: enabled={0} event={1} hidden={2}' -f $script:DebugEventTimer.IsEnabled, $script:DebugEventName, $script:DebugEventHidden)
+}
+if ($DebugAutoDrag) {
+  # Test-only deterministic drag: 40 x 9 DIP moves through the exact same
+  # Begin/Update/End drag functions the mouse handlers use, with animation running.
+  $script:DebugAutoDragTimer = New-Object System.Windows.Threading.DispatcherTimer
+  $script:DebugAutoDragTimer.Interval = [TimeSpan]::FromMilliseconds(15)
+  $script:DebugAutoDragStep = 0
+  $script:DebugAutoDragStarted = $false
+  $script:DebugAutoDragTimer.Add_Tick({
+    if (-not $script:DebugAutoDragStarted) {
+      $dragPointX = [double]$script:ImageLeft + (222 * 0.65)
+      $dragPointY = [double]$script:ImageTop + (323 * 0.65)
+      if (-not (Test-PetAlphaAtPoint $dragPointX $dragPointY)) {
+        Write-Log 'debug auto drag: start point is not opaque; abort'
+        $script:DebugAutoDragTimer.Stop()
+        return
+      }
+      $screenX = [double]$script:Window.Left + $dragPointX
+      $screenY = [double]$script:Window.Top + $dragPointY
+      Begin-OverlayDrag $screenX $screenY
+      $script:DebugAutoDragScreenX = $screenX
+      $script:DebugAutoDragScreenY = $screenY
+      $script:DebugAutoDragStepX = 9
+      if ($script:Window.Left -gt ([System.Windows.SystemParameters]::VirtualScreenWidth / 2.0)) {
+        $script:DebugAutoDragStepX = -9
+      }
+      Write-Log ('debug auto drag start at left={0} top={1} dx={2} screen={3},{4}' -f [int]$script:Window.Left, [int]$script:Window.Top, $script:DebugAutoDragStepX, [int]$screenX, [int]$screenY)
+      $script:DebugAutoDragStarted = $true
+      return
+    }
+    $script:DebugAutoDragStep += 1
+    if ($script:DebugAutoDragStep -le 40) {
+      Update-OverlayDrag ($script:DebugAutoDragScreenX + ($script:DebugAutoDragStep * $script:DebugAutoDragStepX)) $script:DebugAutoDragScreenY
+    } else {
+      $script:DebugAutoDragTimer.Stop()
+      End-OverlayDrag
+      Write-Log 'debug auto drag end'
+    }
+  })
+  $script:DebugAutoDragTimer.Start()
 }
 Write-WindowState 'after-show'
 [void]$script:App.Run($script:Window)
